@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
@@ -73,6 +74,7 @@ namespace GreatClock.Common.ExcelToSO {
 			public bool compress_color_into_int;
 			public bool treat_unknown_types_as_enum;
 			public bool generate_tostring_method;
+			public string[] ref_excels;
 		}
 
 		[Serializable]
@@ -83,18 +85,73 @@ namespace GreatClock.Common.ExcelToSO {
 			public bool use_hash_string;
 			public bool compress_color_into_int;
 			public bool treat_unknown_types_as_enum;
+			public string[] ref_excels;
 		}
 
 		static bool GenerateCode(GenerateCodeSettings settings) {
+			// Build external custom type flags and qualified names from Ref Excels
+			Dictionary<string, string> externalTypeFlags = new Dictionary<string, string>();
+			Dictionary<string, string> externalQualifiedNames = new Dictionary<string, string>();
+			HashSet<string> externalTypeNames = new HashSet<string>();
+			if (settings.ref_excels != null && settings.ref_excels.Length > 0) {
+				ReadsSettings();
+				for (int ri = 0; ri < settings.ref_excels.Length; ri++) {
+					string refPath = settings.ref_excels[ri];
+					if (string.IsNullOrEmpty(refPath)) { continue; }
+					List<SheetData> refSheets = new List<SheetData>();
+					Dictionary<string, List<string>> refUnknown = new Dictionary<string, List<string>>();
+					Dictionary<string, List<string>> refCustom = new Dictionary<string, List<string>>();
+					string refClassName; bool refHasLang; bool refHasRich;
+					if (!ReadExcel(refPath, true, refSheets, refUnknown, refCustom, null, out refClassName, out refHasLang, out refHasRich)) { continue; }
+					string refNS = null;
+					for (int si = 0, simax = excel_settings == null ? 0 : excel_settings.Count; si < simax; si++) {
+						if (excel_settings[si].excel_name == refPath) { refNS = excel_settings[si].name_space; break; }
+					}
+					for (int s = 0; s < refSheets.Count; s++) {
+						SheetData rs = refSheets[s];
+						if (string.IsNullOrEmpty(rs.itemClassName)) { continue; }
+						char tflag;
+						switch (rs.fields[0].fieldType) {
+							case eFieldTypes.Long: tflag = 'l'; break;
+							case eFieldTypes.String: tflag = 's'; break;
+							default: tflag = 'i'; break;
+						}
+						string flag = rs.keyToMultiValues ? (tflag.ToString() + tflag.ToString()) : tflag.ToString();
+						if (!externalTypeFlags.ContainsKey(rs.itemClassName)) {
+							externalTypeFlags.Add(rs.itemClassName, flag);
+							externalTypeNames.Add(rs.itemClassName);
+							string qn = string.IsNullOrEmpty(refNS) ? (refClassName + "." + rs.itemClassName) : (refNS + "." + refClassName + "." + rs.itemClassName);
+							externalQualifiedNames.Add(rs.itemClassName, qn);
+						}
+					}
+				}
+			}
 			List<SheetData> sheets = new List<SheetData>();
 			Dictionary<string, List<string>> unknownTypes = new Dictionary<string, List<string>>();
 			Dictionary<string, List<string>> customTypes = new Dictionary<string, List<string>>();
 			string className;
 			bool hasLang;
 			bool hasRich;
-			if (!ReadExcel(settings.excel_path, settings.treat_unknown_types_as_enum, sheets, unknownTypes, customTypes, out className, out hasLang, out hasRich)) { return false; }
+			if (!ReadExcel(settings.excel_path, settings.treat_unknown_types_as_enum, sheets, unknownTypes, customTypes, externalTypeFlags, out className, out hasLang, out hasRich)) { return false; }
 
 			string serializeAttribute = settings.hide_asset_properties ? "[SerializeField, HideInInspector]" : "[SerializeField]";
+
+			// Collect external excel refs actually used by this main excel
+			Dictionary<string, string> usedExternalExcelRefs = new Dictionary<string, string>(); // simpleName -> qualifiedExcelClass
+			foreach (SheetData sheet in sheets) {
+				foreach (FieldData f in sheet.fields) {
+					if (!externalTypeNames.Contains(f.fieldTypeName)) { continue; }
+					string qn;
+					if (!externalQualifiedNames.TryGetValue(f.fieldTypeName, out qn)) { qn = f.fieldTypeName; }
+					int ld = qn.LastIndexOf('.');
+					if (ld <= 0) { continue; }
+					string excelQn = qn.Substring(0, ld);
+					string tmp = excelQn;
+					int ld2 = tmp.LastIndexOf('.');
+					string excelSimple = ld2 >= 0 ? tmp.Substring(ld2 + 1) : tmp;
+					if (!usedExternalExcelRefs.ContainsKey(excelSimple)) { usedExternalExcelRefs.Add(excelSimple, excelQn); }
+				}
+			}
 			StringBuilder content = new StringBuilder();
 			content.AppendLine("//----------------------------------------------");
 			content.AppendLine("//    Auto Generated. DO NOT edit manually!");
@@ -112,6 +169,19 @@ namespace GreatClock.Common.ExcelToSO {
 					if (sheet.keyToMultiValues) {
 						usingCollections = true;
 						break;
+					}
+				}
+				if (!usingCollections) {
+					foreach (SheetData sheet in sheets) {
+						for (int fi = 0, fimax = sheet.fields.Count; fi < fimax; fi++) {
+							FieldData f = sheet.fields[fi];
+							List<string> flags;
+							if (customTypes.TryGetValue(f.fieldTypeName, out flags) && flags != null && flags.Count > 0 && flags[0].Length > 1) {
+								usingCollections = true;
+								break;
+							}
+						}
+						if (usingCollections) { break; }
 					}
 				}
 			}
@@ -156,6 +226,15 @@ namespace GreatClock.Common.ExcelToSO {
 				content.AppendLine(string.Format("{0}\tpublic Func<string, string> Enrich;", indent));
 				content.AppendLine();
 			}
+			// Reference fields
+			if (usedExternalExcelRefs.Count > 0) {
+				content.AppendLine(string.Format("{0}\t[Header(\"Reference\")]", indent));
+				foreach (var kv in usedExternalExcelRefs) {
+					content.AppendLine(string.Format("{0}\t[SerializeField]", indent));
+					content.AppendLine(string.Format("{0}\tprivate {1} _{2}Ref;", indent, kv.Value, kv.Key));
+				}
+				content.AppendLine();
+			}
 			content.AppendLine(string.Format("{0}\t[NonSerialized]", indent));
 			content.AppendLine(string.Format("{0}\tprivate int mVersion = 1;", indent));
 			content.AppendLine();
@@ -169,8 +248,10 @@ namespace GreatClock.Common.ExcelToSO {
 					content.AppendLine(string.Format("{0}\tpublic int Get{1}Items(List<{1}> items) {{", indent, sheet.itemClassName));
 					content.AppendLine(string.Format("{0}\t\tint len = _{1}Items.Length;", indent, sheet.itemClassName));
 					content.AppendLine(string.Format("{0}\t\tfor (int i = 0; i < len; i++) {{", indent));
-					content.AppendLine(string.Format("{0}\t\t\titems.Add(_{1}Items[i].Init(mVersion, DataGetterObject{2}));",
-						indent, sheet.itemClassName, hashStringKey ? ", false" : ""));
+					content.Append(string.Format("{0}\t\t\titems.Add(_{1}Items[i].Init(mVersion, DataGetterObject", indent, sheet.itemClassName));
+					foreach (var kv in usedExternalExcelRefs) { content.Append(string.Format(", _{0}Ref", kv.Key)); }
+					if (hashStringKey) { content.Append(", false"); }
+					content.AppendLine("));");
 					content.AppendLine(string.Format("{0}\t\t}}", indent));
 					content.AppendLine(string.Format("{0}\t\treturn len;", indent));
 					content.AppendLine(string.Format("{0}\t}}", indent));
@@ -182,7 +263,7 @@ namespace GreatClock.Common.ExcelToSO {
 					if (!sheet.internalData) {
 						content.AppendLine(string.Format("{0}\tpublic List<{1}> Get{1}List({2} {3}) {{", indent, sheet.itemClassName,
 							GetFieldTypeName(firstField.fieldType), idVarName));
-						content.AppendLine(string.Format("{0}\t\tList<{1}> list = new List<{1}>(); ", indent, sheet.itemClassName));
+						content.AppendLine(string.Format("{0}\t\tList<{1}> list = new List<{1}>(); ", indent, sheet.itemClassName ));
 						content.AppendLine(string.Format("{0}\t\tGet{1}List({2}, list);", indent, sheet.itemClassName, idVarName));
 						content.AppendLine(string.Format("{0}\t\treturn list;", indent));
 						content.AppendLine(string.Format("{0}\t}}", indent));
@@ -236,13 +317,15 @@ namespace GreatClock.Common.ExcelToSO {
 					if (hashStringKey) {
 						content.AppendLine(string.Format("{0}\t\t\t{1} item = _{1}Items[index].Init(mVersion, DataGetterObject, true);",
 							indent, sheet.itemClassName));
-						content.AppendLine(string.Format("{0}\t\t\tif (item.{1} == {2}) {{ return item.Init(mVersion, DataGetterObject, false); }}",
-							indent, firstField.fieldName, idVarName));
+						content.Append(string.Format("{0}\t\t\tif (item.{1} == {2}) {{ return item.Init(mVersion, DataGetterObject", indent, firstField.fieldName, idVarName));
+						foreach (var kv in usedExternalExcelRefs) { content.Append(string.Format(", _{0}Ref", kv.Key)); }
+						content.AppendLine(", false); }");
 					} else {
 						content.AppendLine(string.Format("{0}\t\t\t{1} item = _{1}Items[index];",
 							indent, sheet.itemClassName));
-						content.AppendLine(string.Format("{0}\t\t\tif (item.{1} == {2}) {{ return item.Init(mVersion, DataGetterObject); }}",
-							indent, firstField.fieldName, idVarName));
+						content.Append(string.Format("{0}\t\t\tif (item.{1} == {2}) {{ return item.Init(mVersion, DataGetterObject", indent, firstField.fieldName, idVarName));
+						foreach (var kv in usedExternalExcelRefs) { content.Append(string.Format(", _{0}Ref", kv.Key)); }
+						content.AppendLine("); }");
 					}
 					if (firstField.fieldType == eFieldTypes.String) {
 						content.AppendLine(string.Format("{0}\t\t\tif (string.Compare({1}, item.{2}) < 0) {{", indent, idVarName, firstField.fieldName));
@@ -273,6 +356,7 @@ namespace GreatClock.Common.ExcelToSO {
 			if (hasRich) {
 				content.AppendLine(string.Format("{0}\t\tstring Enrich(string key);", indent));
 			}
+			// No external resolver methods
 			foreach (SheetData sheet in sheets) {
 				FieldData firstField = sheet.fields[0];
 				string idVarName = firstField.fieldName;
@@ -303,6 +387,7 @@ namespace GreatClock.Common.ExcelToSO {
 				content.AppendLine(string.Format("{0}\t\t\treturn _Enrich == null ? key : _Enrich(key);", indent));
 				content.AppendLine(string.Format("{0}\t\t}}", indent));
 			}
+			// No external resolver fields/methods
 			foreach (SheetData sheet in sheets) {
 				FieldData firstField = sheet.fields[0];
 				string idVarName = firstField.fieldName;
@@ -335,6 +420,7 @@ namespace GreatClock.Common.ExcelToSO {
 				if (first) { first = false; } else { content.Append(", "); }
 				content.Append("Func<string, string> enrich");
 			}
+			// no external resolvers
 			foreach (SheetData sheet in sheets) {
 				FieldData firstField = sheet.fields[0];
 				if (first) { first = false; } else { content.Append(", "); }
@@ -356,6 +442,7 @@ namespace GreatClock.Common.ExcelToSO {
 			if (hasRich) {
 				content.AppendLine(string.Format("{0}\t\t\t_Enrich = enrich;", indent));
 			}
+			// no external resolver fields
 			foreach (SheetData sheet in sheets) {
 				FieldData firstField = sheet.fields[0];
 				if (sheet.keyToMultiValues) {
@@ -368,8 +455,6 @@ namespace GreatClock.Common.ExcelToSO {
 			}
 			content.AppendLine(string.Format("{0}\t\t}}", indent));
 			content.AppendLine(string.Format("{0}\t}}", indent));
-			content.AppendLine();
-			content.AppendLine(string.Format("{0}\t[NonSerialized]", indent));
 			content.AppendLine(string.Format("{0}\tprivate DataGetter mDataGetterObject;", indent));
 			content.AppendLine(string.Format("{0}\tprivate DataGetter DataGetterObject {{", indent));
 			content.AppendLine(string.Format("{0}\t\tget {{", indent));
@@ -385,6 +470,7 @@ namespace GreatClock.Common.ExcelToSO {
 				if (first) { first = false; } else { content.Append(", "); }
 				content.Append("Enrich");
 			}
+			// No external resolver constructor params
 			foreach (SheetData sheet in sheets) {
 				FieldData firstField = sheet.fields[0];
 				if (first) { first = false; } else { content.Append(", "); }
@@ -415,7 +501,12 @@ namespace GreatClock.Common.ExcelToSO {
 							break;
 						case eFieldTypes.CustomType:
 						case eFieldTypes.ExternalEnum:
-							fieldTypeNameScript = field.fieldTypeName;
+							if (externalTypeNames.Contains(field.fieldTypeName)) {								
+									fieldTypeNameScript = field.fieldTypeName;
+							
+							} else {
+								fieldTypeNameScript = field.fieldTypeName;
+							}
 							break;
 						case eFieldTypes.UnknownList:
 							fieldTypeNameScript = string.Concat(className, ".", field.fieldTypeName, "[]");
@@ -537,16 +628,40 @@ namespace GreatClock.Common.ExcelToSO {
 					}
 					content.AppendLine();
 				}
+				// Declare sheet-private refs
+				foreach (var __kv in usedExternalExcelRefs) {
+					content.AppendLine(string.Format("{0}\tprivate {1} _{2}Ref;", indent, __kv.Value, __kv.Key));
+				}
 				bool hashStringKey = sheet.fields[0].fieldType == eFieldTypes.String && settings.use_hash_string;
 				content.AppendLine(string.Format("{0}\t[NonSerialized]", indent));
 				content.AppendLine(string.Format("{0}\tprivate int mVersion = 0;", indent));
 				content.AppendLine(string.Format("{0}\t[NonSerialized]", indent));
 				content.AppendLine(string.Format("{0}\tprivate {1}.IDataGetter mGetter;", indent, className));
 				content.AppendLine();
-				content.AppendLine(string.Format("{0}\tpublic {1} Init(int version, {2}.IDataGetter getter{3}) {{",
-					indent, sheet.itemClassName, className, hashStringKey ? ", bool keyOnly" : ""));
+				// Build Init signature with sheet refs
+				StringBuilder __initParams = new StringBuilder();
+				foreach (var __kv in usedExternalExcelRefs) { string __p = char.ToLower(__kv.Key[0]) + __kv.Key.Substring(1); __initParams.AppendFormat(", {0} {1}Ref", __kv.Value, __p); }
+				if (hashStringKey) { __initParams.Append(", bool keyOnly"); }
+				content.AppendLine(string.Format("{0}\tpublic {1} Init(int version, {2}.IDataGetter getter{3} ){{", indent, sheet.itemClassName, className, __initParams.ToString()));
+				// if(usedExternalExcelRefs.Count > 0)
+				// {
+				// 	foreach(var __kv in usedExternalExcelRefs)
+				// 	{
+				// 		content.Append($", {__kv.Key} {__kv.Value.First().ToString().ToLower()}{__kv.Value.Substring(1)}Ref");
+				// 	}
+				// }
+				// content.Append(") {");
+
 				content.AppendLine(string.Format("{0}\t\tif (mVersion == version) {{ return this; }}", indent));
 				content.AppendLine(string.Format("{0}\t\tmGetter = getter;", indent));
+				// if(usedExternalExcelRefs.Count > 0)
+				// {
+				// 	foreach(var __kv in usedExternalExcelRefs)
+				// 	{
+				// 		content.AppendLine(string.Format("{0}\t\t_{1}Ref = {2}Ref;", indent, __kv.Key, __kv.Value.First().ToString().ToLower() + __kv.Value.Substring(1)));
+				// 	}
+				// }
+				foreach (var __kv in usedExternalExcelRefs) { string __p = char.ToLower(__kv.Key[0]) + __kv.Key.Substring(1); content.AppendLine(string.Format("{0}\t\t_{1}Ref = {2}Ref;", indent, __kv.Key, __p)); }
 				bool firstField = true;
 				foreach (FieldData field in sheet.fields) {
 					string capitalFieldName = CapitalFirstChar(field.fieldName);
@@ -584,7 +699,40 @@ namespace GreatClock.Common.ExcelToSO {
 							content.AppendLine(string.Format("{0}\t\t_{1}_ = null;",
 								indent, capitalFieldName));
 							break;
-						case eFieldTypes.CustomType:
+					case eFieldTypes.CustomType:
+						if (externalTypeNames.Contains(field.fieldTypeName)) {
+							string typeNameForResolver;
+							if (!externalQualifiedNames.TryGetValue(field.fieldTypeName, out typeNameForResolver)) { typeNameForResolver = field.fieldTypeName; }
+							string keyFlagExt = customTypes[field.fieldTypeName][0];
+							string excelQNameForResolver = null;
+							string excelSimpleNameForResolver = null;
+							{
+								int __ld = typeNameForResolver.LastIndexOf('.');
+								if (__ld > 0) {
+									excelQNameForResolver = typeNameForResolver.Substring(0, __ld);
+									string __tmp = excelQNameForResolver;
+									int __ld2 = __tmp.LastIndexOf('.');
+									excelSimpleNameForResolver = __ld2 >= 0 ? __tmp.Substring(__ld2 + 1) : __tmp;
+								}
+							}
+							if (!string.IsNullOrEmpty(excelQNameForResolver)) {
+								if (keyFlagExt.Length > 1) {
+								content.AppendLine(string.Format("{0}\t\ts_{1}.Clear();", indent, capitalFieldName));
+								content.AppendLine(string.Format("{0}\t\tif (_{1}Ref != null) {{ _{1}Ref.Get{2}List(_{3}, s_{3}); }}", indent, excelSimpleNameForResolver, field.fieldTypeName, capitalFieldName));
+								content.AppendLine(string.Format("{0}\t\t_{1}_ = s_{1}.ToArray();", indent, capitalFieldName));
+								} else {
+								content.AppendLine(string.Format("{0}\t\t_{1}_ = _{2}Ref.Get{3}(_{1});", indent, capitalFieldName, excelSimpleNameForResolver, field.fieldTypeName));
+								}
+							} else {
+								if (keyFlagExt.Length > 1) {
+									content.AppendLine(string.Format("{0}\t\ts_{1}.Clear();", indent, capitalFieldName));
+									content.AppendLine(string.Format("{0}\t\tif (_{1}Ref != null) {{ _{1}Ref.Get{2}List(_{3}, s_{3}); }}", indent, excelSimpleNameForResolver, field.fieldTypeName, capitalFieldName));
+									content.AppendLine(string.Format("{0}\t\t_{1}_ = s_{1}.ToArray();", indent, capitalFieldName));
+								} else {
+									content.AppendLine(string.Format("{0}\t\t_{1}_ = _{2}Ref.Get{3}(_{1});", indent, capitalFieldName, excelSimpleNameForResolver, field.fieldTypeName));
+								}
+							}
+						} else {
 							if (customTypes[field.fieldTypeName][0].Length > 1) {
 								content.AppendLine(string.Format("{0}\t\ts_{1}.Clear();", indent, capitalFieldName));
 								content.AppendLine(string.Format("{0}\t\tgetter.Get{2}List(_{1}, s_{1});",
@@ -594,8 +742,53 @@ namespace GreatClock.Common.ExcelToSO {
 								content.AppendLine(string.Format("{0}\t\t_{1}_ = getter.Get{2}(_{1});",
 									indent, capitalFieldName, field.fieldTypeName));
 							}
-							break;
-						case eFieldTypes.CustomTypeList:
+						}
+						break;
+					case eFieldTypes.CustomTypeList:
+						if (externalTypeNames.Contains(field.fieldTypeName)) {
+							string typeNameForResolver;
+							if (!externalQualifiedNames.TryGetValue(field.fieldTypeName, out typeNameForResolver)) { typeNameForResolver = field.fieldTypeName; }
+							string keyFlagExt = customTypes[field.fieldTypeName][0];
+							content.AppendLine(string.Format("{0}\t\tint len{1} = _{1}.Length;", indent, capitalFieldName));
+							string excelQNameForResolver = null;
+							string excelSimpleNameForResolver = null;
+							{
+								int __ld = typeNameForResolver.LastIndexOf('.');
+								if (__ld > 0) {
+									excelQNameForResolver = typeNameForResolver.Substring(0, __ld);
+									string __tmp = excelQNameForResolver;
+									int __ld2 = __tmp.LastIndexOf('.');
+									excelSimpleNameForResolver = __ld2 >= 0 ? __tmp.Substring(__ld2 + 1) : __tmp;
+								}
+							}
+							if (!string.IsNullOrEmpty(excelQNameForResolver)) {
+								if (keyFlagExt.Length > 1) {
+								content.AppendLine(string.Format("{0}\t\ts_{1}.Clear();", indent, capitalFieldName));
+								content.AppendLine(string.Format("{0}\t\tfor (int i = 0; i < len{1}; i++) {{", indent, capitalFieldName));
+								content.AppendLine(string.Format("{0}\t\t\tif (_{1}Ref != null) {{ _{1}Ref.Get{2}List(_{3}[i], s_{3}); }}", indent, excelSimpleNameForResolver, field.fieldTypeName, capitalFieldName));
+								content.AppendLine(string.Format("{0}\t\t}}", indent));
+									content.AppendLine(string.Format("{0}\t\t_{1}_ = s_{1}.ToArray();", indent, capitalFieldName));
+								} else {
+								content.AppendLine(string.Format("{0}\t\t_{1}_ = new {2}[len{1}];", indent, capitalFieldName, field.fieldTypeName));
+								content.AppendLine(string.Format("{0}\t\tfor (int i = 0; i < len{1}; i++) {{", indent, capitalFieldName));
+								content.AppendLine(string.Format("{0}\t\t\t_{1}_[i] = _{2}Ref.Get{3}(_{1}[i]);", indent, capitalFieldName, excelSimpleNameForResolver, field.fieldTypeName));
+								content.AppendLine(string.Format("{0}\t\t}}", indent));
+								}
+							} else {
+								if (keyFlagExt.Length > 1) {
+									content.AppendLine(string.Format("{0}\t\ts_{1}.Clear();", indent, capitalFieldName));
+									content.AppendLine(string.Format("{0}\t\tfor (int i = 0; i < len{1}; i++) {{", indent, capitalFieldName));
+									content.AppendLine(string.Format("{0}\t\t\tif (_{1}Ref != null) {{ _{1}Ref.Get{2}List(_{3}[i], s_{3}); }}", indent, excelSimpleNameForResolver, field.fieldTypeName, capitalFieldName));
+									content.AppendLine(string.Format("{0}\t\t}}", indent));
+									content.AppendLine(string.Format("{0}\t\t_{1}_ = s_{1}.ToArray();", indent, capitalFieldName));
+								} else {
+									content.AppendLine(string.Format("{0}\t\t_{1}_ = new {2}[len{1}];", indent, capitalFieldName, field.fieldTypeName));
+									content.AppendLine(string.Format("{0}\t\tfor (int i = 0; i < len{1}; i++) {{", indent, capitalFieldName));
+									content.AppendLine(string.Format("{0}\t\t\t_{1}_[i] = _{2}Ref.Get{3}(_{1}[i]);", indent, capitalFieldName, excelSimpleNameForResolver, field.fieldTypeName));
+									content.AppendLine(string.Format("{0}\t\t}}", indent));
+								}
+							}
+						} else {
 							content.AppendLine(string.Format("{0}\t\tint len{1} = _{1}.Length;",
 								indent, capitalFieldName));
 							if (customTypes[field.fieldTypeName][0].Length > 1) {
@@ -615,7 +808,8 @@ namespace GreatClock.Common.ExcelToSO {
 									indent, capitalFieldName, field.fieldTypeName));
 								content.AppendLine(string.Format("{0}\t\t}}", indent));
 							}
-							break;
+						}
+						break;
 					}
 					if (!firstField) { continue; }
 					firstField = false;
@@ -705,13 +899,41 @@ namespace GreatClock.Common.ExcelToSO {
 		}
 
 		static bool FlushData(FlushDataSettings settings) {
+			// Build external custom type flags from Ref Excels
+			Dictionary<string, string> externalTypeFlags = new Dictionary<string, string>();
+			if (settings.ref_excels != null && settings.ref_excels.Length > 0) {
+				ReadsSettings();
+				for (int ri = 0; ri < settings.ref_excels.Length; ri++) {
+					string refPath = settings.ref_excels[ri];
+					if (string.IsNullOrEmpty(refPath)) { continue; }
+					List<SheetData> refSheets = new List<SheetData>();
+					Dictionary<string, List<string>> refUnknown = new Dictionary<string, List<string>>();
+					Dictionary<string, List<string>> refCustom = new Dictionary<string, List<string>>();
+					string refClassName; bool refHasLang; bool refHasRich;
+					if (!ReadExcel(refPath, true, refSheets, refUnknown, refCustom, null, out refClassName, out refHasLang, out refHasRich)) { continue; }
+					for (int s = 0; s < refSheets.Count; s++) {
+						SheetData rs = refSheets[s];
+						if (string.IsNullOrEmpty(rs.itemClassName)) { continue; }
+						char tflag;
+						switch (rs.fields[0].fieldType) {
+							case eFieldTypes.Long: tflag = 'l'; break;
+							case eFieldTypes.String: tflag = 's'; break;
+							default: tflag = 'i'; break;
+						}
+						string flag = rs.keyToMultiValues ? (tflag.ToString() + tflag.ToString()) : tflag.ToString();
+						if (!externalTypeFlags.ContainsKey(rs.itemClassName)) {
+							externalTypeFlags.Add(rs.itemClassName, flag);
+						}
+					}
+				}
+			}
 			List<SheetData> sheets = new List<SheetData>();
 			Dictionary<string, List<string>> unknownTypes = new Dictionary<string, List<string>>();
 			Dictionary<string, List<string>> customTypes = new Dictionary<string, List<string>>();
 			string className;
 			bool hasLang;
 			bool hasRich;
-			if (!ReadExcel(settings.excel_path, settings.treat_unknown_types_as_enum, sheets, unknownTypes, customTypes, out className, out hasLang, out hasRich)) { return false; }
+			if (!ReadExcel(settings.excel_path, settings.treat_unknown_types_as_enum, sheets, unknownTypes, customTypes, externalTypeFlags, out className, out hasLang, out hasRich)) { return false; }
 
 			if (!Directory.Exists(settings.asset_directory)) {
 				Directory.CreateDirectory(settings.asset_directory);
@@ -774,6 +996,30 @@ namespace GreatClock.Common.ExcelToSO {
 					invalidFields.Clear();
 					SerializedProperty pItems = so.FindProperty(string.Format("_{0}Items", sheet.itemClassName));
 					pItems.ClearArray();
+                    // Auto bind external refs on the main asset (same directory, name match)
+                    foreach (KeyValuePair<string, List<string>> kv in customTypes) {
+                        if (!externalTypeFlags.ContainsKey(kv.Key)) { continue; }
+                        // We only know the sheet name here; infer excel class simple name by scanning ref_excels
+                        string excelSimple = null;
+                        if (settings.ref_excels != null) {
+                            for (int ri = 0; ri < settings.ref_excels.Length; ri++) {
+                                string refPath = settings.ref_excels[ri];
+                                if (string.IsNullOrEmpty(refPath)) { continue; }
+                                string refClassNameLocal = System.IO.Path.GetFileNameWithoutExtension(refPath);
+                                // Assume same namespace as main when binding
+                                // First hit wins in order
+                                excelSimple = refClassNameLocal; break;
+                            }
+                        }
+                        if (string.IsNullOrEmpty(excelSimple)) { continue; }
+                        SerializedProperty pRef = so.FindProperty(string.Format("_{0}Ref", excelSimple));
+                        if (pRef != null && pRef.objectReferenceValue == null) {
+                            string dir = System.IO.Path.GetDirectoryName(assetPath).Replace('\\', '/');
+                            string refPath = dir + "/" + excelSimple + ".asset";
+                            UnityEngine.Object refObj = AssetDatabase.LoadAssetAtPath(refPath, typeof(UnityEngine.ScriptableObject));
+                            if (refObj != null) { pRef.objectReferenceValue = refObj; }
+                        }
+                    }
 					for (int i = 0, imax = sheet.indices.Count; i < imax; i++) {
 						if (EditorUtility.DisplayCancelableProgressBar("Excel", string.Format("Serializing datas... {0} / {1}", i, imax), (i + 0f) / imax)) {
 							EditorUtility.ClearProgressBar();
@@ -1016,6 +1262,7 @@ namespace GreatClock.Common.ExcelToSO {
 
 		static bool ReadExcel(string excel_path, bool treat_unknown_types_as_enum, List<SheetData> sheets,
 			Dictionary<string, List<string>> unknownTypes, Dictionary<string, List<string>> customTypes,
+			Dictionary<string, string> externalCustomTypeFlags,
 			out string className, out bool hasLang, out bool hasRich) {
 			className = Path.GetFileNameWithoutExtension(excel_path);
 			hasLang = false;
@@ -1283,6 +1530,22 @@ namespace GreatClock.Common.ExcelToSO {
 						break;
 				}
 				customTypes.Add(sheet.itemClassName, values);
+			}
+			// Merge external custom type flags from Ref Excels
+			if (externalCustomTypeFlags != null) {
+				foreach (KeyValuePair<string, string> kv in externalCustomTypeFlags) {
+					List<string> values;
+					if (unknownTypes.TryGetValue(kv.Key, out values)) {
+						unknownTypes.Remove(kv.Key);
+						List<string> list = new List<string>();
+						list.Add(kv.Value);
+						customTypes[kv.Key] = list;
+					} else if (!customTypes.ContainsKey(kv.Key)) {
+						List<string> list = new List<string>();
+						list.Add(kv.Value);
+						customTypes[kv.Key] = list;
+					}
+				}
 			}
 			if (!treat_unknown_types_as_enum && unknownTypes.Count > 0) {
 				string[] typeStrs = new string[unknownTypes.Count];
@@ -1658,6 +1921,7 @@ namespace GreatClock.Common.ExcelToSO {
 		const float right = 96f;
 		const float right_space = 100f;
 		private static GUIContent s_content_slave = new GUIContent("Slave Excels :");
+		private static GUIContent s_content_ref = new GUIContent("Ref Excels :");
 
 		private class ExcelToScriptableObjectSettingWrap {
 			public string filterName;
@@ -1668,6 +1932,8 @@ namespace GreatClock.Common.ExcelToSO {
 			private string[] mFolders;
 			private List<ExcelToScriptableObjectSlaveWrap> mSlavesData = new List<ExcelToScriptableObjectSlaveWrap>();
 			private ReorderableList mSlavesList;
+			private List<ExcelToScriptableObjectRefWrap> mRefsData = new List<ExcelToScriptableObjectRefWrap>();
+			private ReorderableList mRefsList;
 			private ToProcess mToProcess;
 			public ExcelToScriptableObjectSettingWrap(ExcelToScriptableObjectSetting setting, Action<ExcelToScriptableObjectSettingWrap> onRemove) {
 				this.setting = setting;
@@ -1705,6 +1971,39 @@ namespace GreatClock.Common.ExcelToSO {
 				mSlavesList.drawElementCallback = (Rect rect, int index, bool isActive, bool isFocused) => {
 					mSlavesData[index].DrawGUI(rect, isActive, isFocused, mToProcess);
 				};
+				mRefsList = new ReorderableList(mRefsData, typeof(ExcelToScriptableObjectRefWrap));
+				mRefsList.drawHeaderCallback = (Rect rect) => {
+					EditorGUI.LabelField(rect, s_content_ref);
+				};
+				mRefsList.onAddCallback = (ReorderableList list) => {
+					ExcelToScriptableObjectRefWrap wrap = new ExcelToScriptableObjectRefWrap();
+					mRefsData.Add(wrap);
+					int n = mRefsData.Count;
+					mSetting.ref_excels = new string[n];
+					for (int i = 0; i < n; i++) {
+						mSetting.ref_excels[i] = mRefsData[i].excelPath;
+					}
+				};
+				mRefsList.elementHeightCallback = (int index) => {
+					return mRefsData[index].GetGUIHeight();
+				};
+				mRefsList.drawElementBackgroundCallback = (Rect rect, int index, bool isActive, bool isFocused) => {
+					if (mRefsData.Count <= 0) { return; }
+					Color color = new Color(0f, 0f, 0f, 0.55f - 0.15f * (index & 1));
+					if (isActive && isFocused) {
+						color = new Color32(61, 96, 145, 255);
+					}
+					rect.x += 1f;
+					rect.y += 1f;
+					rect.height -= 1f;
+					rect.width -= 3f;
+					EditorGUI.DrawRect(rect, color);
+				};
+				mRefsList.drawElementCallback = (Rect rect, int index, bool isActive, bool isFocused) => {
+					mRefsData[index].DrawGUI(rect, isActive, isFocused, (string p) => {
+						mSetting.ref_excels[index] = p;
+					});
+				};
 			}
 			private ExcelToScriptableObjectSetting mSetting;
 			public ExcelToScriptableObjectSetting setting {
@@ -1714,6 +2013,7 @@ namespace GreatClock.Common.ExcelToSO {
 				set {
 					mSetting = value;
 					if (mSetting.slaves == null) { mSetting.slaves = new ExcelToScriptableObjectSlave[0]; }
+					if (mSetting.ref_excels == null) { mSetting.ref_excels = new string[0]; }
 					int n = mSetting.slaves.Length;
 					int m = mSlavesData.Count;
 					for (int i = 0; i < n; i++) {
@@ -1737,6 +2037,30 @@ namespace GreatClock.Common.ExcelToSO {
 						}
 					}
 					for (int i = m - 1; i >= n; i--) { mSlavesData.RemoveAt(i); }
+					int nr = mSetting.ref_excels.Length;
+					int mr = mRefsData.Count;
+					for (int i = 0; i < nr; i++) {
+						string p = mSetting.ref_excels[i];
+						bool flag = false;
+						for (int j = i; j < mr; j++) {
+							ExcelToScriptableObjectRefWrap wrap = mRefsData[j];
+							if (wrap.excelPath == p) {
+								wrap.excelPath = p;
+								flag = true;
+								if (i != j) {
+									mRefsData.RemoveAt(j);
+									mRefsData.Insert(i, wrap);
+								}
+								break;
+							}
+						}
+						if (!flag) {
+							ExcelToScriptableObjectRefWrap wrap = new ExcelToScriptableObjectRefWrap();
+							wrap.excelPath = p;
+							mRefsData.Insert(i, wrap);
+						}
+					}
+					for (int i = mr - 1; i >= nr; i--) { mRefsData.RemoveAt(i); }
 				}
 			}
 			public List<ExcelToScriptableObjectSlaveWrap> slaves { get { return mSlavesData; } }
@@ -1754,7 +2078,7 @@ namespace GreatClock.Common.ExcelToSO {
 				}
 			}
 			public float GetGUIHeight() {
-				return (EditorGUIUtility.singleLineHeight + EditorGUIUtility.standardVerticalSpacing) * 7 + 4f + mSlavesList.GetHeight();
+				return (EditorGUIUtility.singleLineHeight + EditorGUIUtility.standardVerticalSpacing) * 7 + 4f + mSlavesList.GetHeight() + 4f + mRefsList.GetHeight();
 			}
 			public void DrawGUI(Rect rect, bool isActive, bool isFocused, ToProcess toProcess) {
 				Event evt = Event.current;
@@ -1895,6 +2219,9 @@ namespace GreatClock.Common.ExcelToSO {
 				pos.width = rect.width;
 				pos.height = mSlavesList.GetHeight();
 				mSlavesList.DoList(pos);
+				pos.y += pos.height + EditorGUIUtility.standardVerticalSpacing;
+				pos.height = mRefsList.GetHeight();
+				mRefsList.DoList(pos);
 				if (evt.type == EventType.MouseDown && evt.button == 1) {
 					if (rect.Contains(evt.mousePosition) && !pos.Contains(evt.mousePosition)) {
 						GenericMenu menu = new GenericMenu();
@@ -1905,6 +2232,50 @@ namespace GreatClock.Common.ExcelToSO {
 						evt.Use();
 					}
 				}
+			}
+		}
+
+		private class ExcelToScriptableObjectRefWrap {
+			public string excelPath;
+			public string filterName;
+			public float GetGUIHeight() {
+				return (EditorGUIUtility.singleLineHeight + EditorGUIUtility.standardVerticalSpacing) * 1 + 2f;
+			}
+			public void DrawGUI(Rect rect, bool isActive, bool isFocus, Action<string> onChanged) {
+				Event evt = Event.current;
+				Rect pos = rect;
+				pos.y += 2f;
+				pos.height = EditorGUIUtility.singleLineHeight;
+				pos.width = rect.width - right_space - 80f;
+				bool excelInvalid = string.IsNullOrEmpty(excelPath);
+				EditorGUI.LabelField(pos, "Excel File", excelInvalid ? "(Not Selected)" : (string.IsNullOrEmpty(filterName) ? excelPath : filterName), style_rich_text);
+				Color cachedGUIBGColor = GUI.backgroundColor;
+				if (excelInvalid) { GUI.backgroundColor = Color.green; }
+				pos.x += pos.width;
+				pos.width = 40f;
+				if (GUI.Button(pos, "Select", style_mini_button)) {
+					string p = EditorUtility.OpenFilePanel("Select Excel File", ".", "xlsx");
+					if (!string.IsNullOrEmpty(p)) {
+						string projPath = Application.dataPath;
+						projPath = projPath.Substring(0, projPath.Length - 6);
+						if (p.StartsWith(projPath)) { p = p.Substring(projPath.Length, p.Length - projPath.Length); }
+						excelPath = p;
+						GUI.changed = true;
+						onChanged?.Invoke(excelPath);
+					}
+				}
+				GUI.backgroundColor = cachedGUIBGColor;
+				if (!excelInvalid) { GUI.backgroundColor = Color.green; }
+				pos.x += pos.width;
+				if (GUI.Button(pos, "Open", style_mini_button)) {
+					if (evt.shift) {
+						string folder = Path.GetDirectoryName(excelPath);
+						EditorUtility.OpenWithDefaultApp(folder);
+					} else {
+						EditorUtility.OpenWithDefaultApp(excelPath);
+					}
+				}
+				GUI.backgroundColor = cachedGUIBGColor;
 			}
 		}
 
@@ -2338,6 +2709,7 @@ namespace GreatClock.Common.ExcelToSO {
 			ret.compress_color_into_int = setting.compress_color_into_int;
 			ret.treat_unknown_types_as_enum = setting.treat_unknown_types_as_enum;
 			ret.generate_tostring_method = setting.generate_tostring_method;
+			ret.ref_excels = setting.ref_excels;
 			return ret;
 		}
 
@@ -2350,6 +2722,7 @@ namespace GreatClock.Common.ExcelToSO {
 			ret.use_hash_string = setting.use_hash_string;
 			ret.compress_color_into_int = setting.compress_color_into_int;
 			ret.treat_unknown_types_as_enum = setting.treat_unknown_types_as_enum;
+			ret.ref_excels = setting.ref_excels;
 			return ret;
 		}
 
@@ -2501,6 +2874,7 @@ namespace GreatClock.Common.ExcelToSO {
 		public bool treat_unknown_types_as_enum = false;
 		public bool generate_tostring_method = true;
 		public ExcelToScriptableObjectSlave[] slaves;
+		public string[] ref_excels;
 	}
 
 	[Serializable]
