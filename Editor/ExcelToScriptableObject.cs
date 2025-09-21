@@ -47,6 +47,56 @@ namespace GreatClock.Common.ExcelToSO {
 			AssetDatabase.SaveAssets();
 		}
 
+		[MenuItem("GreatClock/Excel To ScriptableObject/Fix Reference Error")]
+		public static void FixReferenceError() {
+			ReadsSettings();
+			HashSet<string> processedDirs = new HashSet<string>();
+			int fixedCount = 0;
+			int assetCount = 0;
+			for (int i = 0, imax = excel_settings == null ? 0 : excel_settings.Count; i < imax; i++) {
+				ExcelToScriptableObjectSetting excel_setting = excel_settings[i];
+				if (excel_setting == null) { continue; }
+				if (CheckIsDirectoryValid(excel_setting.asset_directory)) { processedDirs.Add(excel_setting.asset_directory); }
+				if (excel_setting.slaves != null) {
+					for (int j = 0, jmax = excel_setting.slaves.Length; j < jmax; j++) {
+						var slave = excel_setting.slaves[j];
+						if (slave != null && CheckIsDirectoryValid(slave.asset_directory)) { processedDirs.Add(slave.asset_directory); }
+					}
+				}
+			}
+			foreach (string dir in processedDirs) {
+				string[] guids = AssetDatabase.FindAssets("t:ScriptableObject", new string[] { dir });
+				for (int g = 0; g < guids.Length; g++) {
+					string path = AssetDatabase.GUIDToAssetPath(guids[g]);
+					ScriptableObject obj = AssetDatabase.LoadAssetAtPath<ScriptableObject>(path);
+					if (obj == null) { continue; }
+					assetCount++;
+					Type t = obj.GetType();
+					FieldInfo[] fields = t.GetFields(BindingFlags.NonPublic | BindingFlags.Instance);
+					bool changed = false;
+					for (int f = 0; f < fields.Length; f++) {
+						FieldInfo field = fields[f];
+						string fname = field.Name;
+						if (!fname.StartsWith("_") || !fname.EndsWith("Ref")) { continue; }
+						if (!typeof(ScriptableObject).IsAssignableFrom(field.FieldType)) { continue; }
+						object cur = field.GetValue(obj);
+						if (cur != null) { continue; }
+						string folder = System.IO.Path.GetDirectoryName(path).Replace('\\', '/');
+						string simple = fname.Substring(1, fname.Length - 1 - 3);
+						string refPath = folder + "/" + simple + ".asset";
+						UnityEngine.Object refObj = AssetDatabase.LoadAssetAtPath(refPath, field.FieldType);
+						if (refObj == null) { continue; }
+						field.SetValue(obj, refObj);
+						fixedCount++;
+						changed = true;
+					}
+					if (changed) { EditorUtility.SetDirty(obj); }
+				}
+			}
+			AssetDatabase.SaveAssets();
+			EditorUtility.DisplayDialog("Excel To ScriptableObject", string.Format("Checked {0} assets.\nFixed {1} missing references.", assetCount, fixedCount), "OK");
+		}
+
 		private class SheetData {
 			public DataTable table;
 			public string itemClassName;

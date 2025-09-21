@@ -295,6 +295,7 @@ Value Example :
 - **Treat Unknown Types as Enum** : If checked, you can define a enum type in sheets. If a enum type is necessary, just fill the type field with enum type you need to define, and fill its data column with the enum values that needed. The enum type in generated C-Sharp code will exactly contains all the enum values that exists in your columns with the enum type.
 
 - **Generate ToString Meghod** : If checked, a ToString method will be generated to override its base. It's easy to make your data item readable when Debug Log to console.
+- **Ref Excel (cross-excel type reference)** : Allow unknown field types in the main Excel (e.g. `Buffer[]`) to reference a Sheet with the same name (e.g. `Buffer`) in other Excel files configured in "Ref Excels". At generation time, the tool records a mapping from unknown type name to external Excel. At runtime, generated code routes `Get{Type}`/`Get{Type}List` calls to the external Excel asset automatically. See the guide: [RefExcel_Guide](./Guide/RefExcel_Guide.md).
 
 - In xlsx file, sheets with name that starts with '#' will be ignored.
 

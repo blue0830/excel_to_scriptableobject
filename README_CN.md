@@ -291,6 +291,7 @@
 - **Treat Unknown Types as Enum** ：将未知类型的数据按枚举类型处理，方便在Excel文件中定义枚举类型的数据。若某一字段需要使用枚举值，则需要在表中字段类型定义处填入需要的枚举类型名称，在数据条目中的该列处，填写条目所需要的枚举值即可。代码中所有枚举值为该类型的枚举的列中出现的所有的不同的值。
 
 - **Generate ToString Meghod** ：指定是否生成ToString方法。推荐勾选此荐，尤其是在调试过程中，以方便直接通过控制台打印日志的方式阅读条目中的所有数据。
+- **Ref Excel（跨表引用）**：允许在主表中的未知类型字段（如 `Buffer[]`）引用到其他 Excel 中同名的 Sheet（如 `Buffer`）。生成阶段会记录“未知类型名 → 外部 Excel”的映射；运行时生成代码会将 `Get{Type}`/`Get{Type}List` 调用自动路由到对应的外部 Excel 资源。详见指南：[RefExcel_Guide](./Guide/RefExcel_Guide.md)。
 
 - Excel文件中，名称以#开头的sheet将不被读取。
 
