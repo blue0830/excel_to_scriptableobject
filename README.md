@@ -12,11 +12,13 @@ NO EXTRA API AT ALL. All you need to use will be in the generated codes。
 
 ## How It Works
 
-1. A C-Sharp code will be generated in specific folder, the same file name with xlsx. All the data types in its sheets will be included, with the class names as sheets' names in xlsx file. The C-Sharp code is used for serializing and retrieving datas.
+1. Before generating code, first check if IDataProvider.cs interface file exists in the specified directory, if not, automatically generate this interface file according to the configured namespace.
 
-2. After compiling generated code, All the datas in sheets will be saved in a Unity asset in specific folder with the same file name with xlsx.
+2. A C-Sharp code will be generated in specific folder, the same file name with xlsx. All the data types in its sheets will be included, with the class names as sheets' names in xlsx file. The C-Sharp code is used for serializing and retrieving datas.
 
-3. Before writing datas in asset file, datas in each sheets will be sorted, in order to make binary search available.
+3. After compiling generated code, All the datas in sheets will be saved in a Unity asset in specific folder with the same file name with xlsx.
+
+4. Before writing datas in asset file, datas in each sheets will be sorted, in order to make binary search available.
 
 ## Rules
 
