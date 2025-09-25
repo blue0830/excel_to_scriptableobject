@@ -16,7 +16,24 @@ namespace GreatClock.Common.ExcelToSO {
 
 	public class ExcelToScriptableObject : EditorWindow {
 
-		public const string SETTINGS_PATH = "ProjectSettings/ExcelToScriptableObjectSettings.asset";
+	public const string SETTINGS_PATH = "ProjectSettings/ExcelToScriptableObjectSettings.asset";
+	private const string IDataProviderTemplatePath = "Assets/excel_to_scriptableobject/IDataProvider.cs";
+ 
+		private static void EnsureIDataProviderFile(string scriptDirectory) {
+			if (string.IsNullOrEmpty(scriptDirectory)) { return; }
+			if (!CheckIsDirectoryValid(scriptDirectory)) { return; }
+			string sourcePath = IDataProviderTemplatePath;
+			string sourceFullPath = Path.Combine(Application.dataPath.Substring(0, Application.dataPath.Length - "Assets".Length), sourcePath);
+			if (!File.Exists(sourceFullPath)) { return; }
+			string targetPath = scriptDirectory.EndsWith("/") ? (scriptDirectory + "IDataProvider.cs") : (scriptDirectory + "/IDataProvider.cs");
+			string projectRoot = Application.dataPath.Substring(0, Application.dataPath.Length - "Assets".Length);
+			string fullTargetPath = Path.Combine(projectRoot, targetPath.Replace('/', Path.DirectorySeparatorChar));
+			if (File.Exists(fullTargetPath)) { return; }
+			string targetDir = Path.GetDirectoryName(fullTargetPath);
+			if (!Directory.Exists(targetDir)) { Directory.CreateDirectory(targetDir); }
+			File.Copy(sourceFullPath, fullTargetPath, false);
+			AssetDatabase.ImportAsset(targetPath);
+		}
 
 		private static Regex reg_color32 = new Regex(@"^[A-Fa-f0-9]{8}$");
 		private static Regex reg_color24 = new Regex(@"^[A-Fa-f0-9]{6}$");
@@ -34,6 +51,7 @@ namespace GreatClock.Common.ExcelToSO {
 			for (int i = 0, imax = excel_settings.Count; i < imax; i++) {
 				ExcelToScriptableObjectSetting excel_setting = excel_settings[i];
 				if (!CheckProcessable(excel_setting)) { continue; }
+				EnsureIDataProviderFile(excel_setting.script_directory);
 				FlushDataSettings setting = GetFlushDataSettings(excel_setting);
 				FlushData(setting);
 				for (int j = 0, jmax = excel_setting.slaves.Length; j < jmax; j++) {
@@ -51,6 +69,11 @@ namespace GreatClock.Common.ExcelToSO {
 		[MenuItem("GreatClock/Excel To ScriptableObject/Fix Reference Error")]
 		public static void FixReferenceError() {
 			ReadsSettings();
+			for (int i = 0, imax = excel_settings == null ? 0 : excel_settings.Count; i < imax; i++) {
+				ExcelToScriptableObjectSetting excel_setting = excel_settings[i];
+				if (excel_setting == null) { continue; }
+				EnsureIDataProviderFile(excel_setting.script_directory);
+			}
 			HashSet<string> processedDirs = new HashSet<string>();
 			int fixedCount = 0;
 			int assetCount = 0;
@@ -139,6 +162,7 @@ namespace GreatClock.Common.ExcelToSO {
 		}
 
 		static bool GenerateCode(GenerateCodeSettings settings) {
+			EnsureIDataProviderFile(settings.script_directory);
 			// Build external custom type flags and qualified names from Ref Excels
 			Dictionary<string, string> externalTypeFlags = new Dictionary<string, string>();
 			Dictionary<string, string> externalQualifiedNames = new Dictionary<string, string>();
@@ -211,31 +235,8 @@ namespace GreatClock.Common.ExcelToSO {
 			content.AppendLine();
 			content.AppendLine("using System;");
 			content.AppendLine("using UnityEngine;");
-			bool usingCollections = false;
-			if (settings.use_public_items_getter) {
-				usingCollections = true;
-			} else {
-				foreach (SheetData sheet in sheets) {
-					if (sheet.keyToMultiValues) {
-						usingCollections = true;
-						break;
-					}
-				}
-				if (!usingCollections) {
-					foreach (SheetData sheet in sheets) {
-						for (int fi = 0, fimax = sheet.fields.Count; fi < fimax; fi++) {
-							FieldData f = sheet.fields[fi];
-							List<string> flags;
-							if (customTypes.TryGetValue(f.fieldTypeName, out flags) && flags != null && flags.Count > 0 && flags[0].Length > 1) {
-								usingCollections = true;
-								break;
-							}
-						}
-						if (usingCollections) { break; }
-					}
-				}
-			}
-			if (usingCollections) { content.AppendLine("using System.Collections.Generic;"); }
+			bool usingCollections = true;
+			content.AppendLine("using System.Collections.Generic;");
 			content.AppendLine();
 
 			string indent = "";
@@ -245,7 +246,7 @@ namespace GreatClock.Common.ExcelToSO {
 				indent = "\t";
 			}
 
-			content.AppendLine(string.Format("{0}public partial class {1} : ScriptableObject {{", indent, className));
+			content.AppendLine(string.Format("{0}public partial class {1} : ScriptableObject, IDataProvider<{2}> {{", indent, className, sheets.Count > 0 ? sheets[0].itemClassName : "object"));
 			content.AppendLine();
 			if (settings.use_hash_string) {
 				content.AppendLine(string.Format("{0}\t{1}", indent, serializeAttribute));
@@ -294,11 +295,18 @@ namespace GreatClock.Common.ExcelToSO {
 				bool hashStringKey = firstField.fieldType == eFieldTypes.String && settings.use_hash_string;
 				content.AppendLine(string.Format("{0}\t{1}", indent, serializeAttribute));
 				content.AppendLine(string.Format("{0}\tprivate {1}[] _{1}Items;", indent, sheet.itemClassName));
+				// Per-sheet dictionary for fast lookup
+				{
+					var __firstField = sheet.fields[0];
+					string __keyType = GetFieldTypeName(__firstField.fieldType);
+					if (string.IsNullOrEmpty(__keyType)) { __keyType = "int"; }
+					content.AppendLine(string.Format("{0}\tprivate Dictionary<{1}, {2}> _{2}ItemsMap = new Dictionary<{1}, {2}>();", indent, __keyType, sheet.itemClassName));
+				}
 				if (settings.use_public_items_getter) {
 					content.AppendLine(string.Format("{0}\tpublic int Get{1}Items(List<{1}> items) {{", indent, sheet.itemClassName));
 					content.AppendLine(string.Format("{0}\t\tint len = _{1}Items.Length;", indent, sheet.itemClassName));
 					content.AppendLine(string.Format("{0}\t\tfor (int i = 0; i < len; i++) {{", indent));
-					content.Append(string.Format("{0}\t\t\titems.Add(_{1}Items[i].Init(mVersion, DataGetterObject", indent, sheet.itemClassName));
+					content.Append(string.Format("{0}\t\t\titems.Add(_{1}Items[i].Init(mVersion", indent, sheet.itemClassName));
 					foreach (var kv in usedExternalExcelRefs) { content.Append(string.Format(", _{0}Ref", kv.Key)); }
 					if (hashStringKey) { content.Append(", false"); }
 					content.AppendLine("));");
@@ -327,8 +335,8 @@ namespace GreatClock.Common.ExcelToSO {
 					content.AppendLine(string.Format("{0}\t\tint index = -1;", indent));
 					content.AppendLine(string.Format("{0}\t\twhile (min < max) {{", indent));
 					content.AppendLine(string.Format("{0}\t\t\tint i = (min + max) >> 1;", indent));
-					content.AppendLine(string.Format("{0}\t\t\t{1} item = _{1}Items[i]{2};", indent, sheet.itemClassName,
-						hashStringKey ? ".Init(mVersion, DataGetterObject, true)" : ""));
+						content.AppendLine(string.Format("{0}\t\t\t{1} item = _{1}Items[i]{2};", indent, sheet.itemClassName,
+							hashStringKey ? ".Init(mVersion, true)" : ""));
 					content.AppendLine(string.Format("{0}\t\t\tif (item.{1} == {2}) {{", indent, firstField.fieldName, idVarName));
 					content.AppendLine(string.Format("{0}\t\t\t\tindex = i;", indent));
 					content.AppendLine(string.Format("{0}\t\t\t\tbreak;", indent));
@@ -351,7 +359,7 @@ namespace GreatClock.Common.ExcelToSO {
 					content.AppendLine(string.Format("{0}\t\twhile (r + 1 < len && _{1}Items[r + 1].{2} == {3}) {{ r++; }}",
 						indent, sheet.itemClassName, firstField.fieldName, idVarName));
 					content.AppendLine(string.Format("{0}\t\tfor (int i = l; i <= r; i++) {{", indent));
-					content.AppendLine(string.Format("{0}\t\t\tlist.Add(_{1}Items[i].Init(mVersion, DataGetterObject{2}));",
+					content.AppendLine(string.Format("{0}\t\t\tlist.Add(_{1}Items[i].Init(mVersion{2}));",
 						indent, sheet.itemClassName, hashStringKey ? ", false" : ""));
 					content.AppendLine(string.Format("{0}\t\t}}", indent));
 					content.AppendLine(string.Format("{0}\t\treturn r - l + 1;", indent));
@@ -365,15 +373,15 @@ namespace GreatClock.Common.ExcelToSO {
 					content.AppendLine(string.Format("{0}\t\twhile (min < max) {{", indent));
 					content.AppendLine(string.Format("{0}\t\t\tint index = (min + max) >> 1;", indent));
 					if (hashStringKey) {
-						content.AppendLine(string.Format("{0}\t\t\t{1} item = _{1}Items[index].Init(mVersion, DataGetterObject, true);",
+						content.AppendLine(string.Format("{0}\t\t\t{1} item = _{1}Items[index].Init(mVersion, true);",
 							indent, sheet.itemClassName));
-						content.Append(string.Format("{0}\t\t\tif (item.{1} == {2}) {{ return item.Init(mVersion, DataGetterObject", indent, firstField.fieldName, idVarName));
+						content.Append(string.Format("{0}\t\t\tif (item.{1} == {2}) {{ return item.Init(mVersion", indent, firstField.fieldName, idVarName));
 						foreach (var kv in usedExternalExcelRefs) { content.Append(string.Format(", _{0}Ref", kv.Key)); }
 						content.AppendLine(", false); }");
 					} else {
 						content.AppendLine(string.Format("{0}\t\t\t{1} item = _{1}Items[index];",
 							indent, sheet.itemClassName));
-						content.Append(string.Format("{0}\t\t\tif (item.{1} == {2}) {{ return item.Init(mVersion, DataGetterObject", indent, firstField.fieldName, idVarName));
+						content.Append(string.Format("{0}\t\t\tif (item.{1} == {2}) {{ return item.Init(mVersion", indent, firstField.fieldName, idVarName));
 						foreach (var kv in usedExternalExcelRefs) { content.Append(string.Format(", _{0}Ref", kv.Key)); }
 						content.AppendLine("); }");
 					}
@@ -396,145 +404,46 @@ namespace GreatClock.Common.ExcelToSO {
 			content.AppendLine(string.Format("{0}\t\tmVersion++;", indent));
 			content.AppendLine(string.Format("{0}\t}}", indent));
 			content.AppendLine();
-			content.AppendLine(string.Format("{0}\tpublic interface IDataGetter {{", indent));
-			if (settings.use_hash_string) {
-				content.AppendLine(string.Format("{0}\t\tstring[] strings {{ get; }}", indent));
-			}
-			if (hasLang) {
-				content.AppendLine(string.Format("{0}\t\tstring Translate(string key);", indent));
-			}
-			if (hasRich) {
-				content.AppendLine(string.Format("{0}\t\tstring Enrich(string key);", indent));
-			}
-			// No external resolver methods
-			foreach (SheetData sheet in sheets) {
+			// IDataProvider implementation and map initialization
+			content.AppendLine(string.Format("{0}\tpublic bool Init() {{", indent));
+			for (int si = 0; si < sheets.Count; si++) {
+				SheetData sheet = sheets[si];
 				FieldData firstField = sheet.fields[0];
-				string idVarName = firstField.fieldName;
-				if (sheet.keyToMultiValues) {
-					content.AppendLine(string.Format("{0}\t\tint Get{1}List({2} {3}, List<{1}> list);",
-						indent, sheet.itemClassName, GetFieldTypeName(firstField.fieldType), idVarName));
-				} else {
-					content.AppendLine(string.Format("{0}\t\t{1} Get{1}({2} {3});",
-						indent, sheet.itemClassName, GetFieldTypeName(firstField.fieldType), idVarName));
-				}
-			}
-			content.AppendLine(string.Format("{0}\t}}", indent));
-			content.AppendLine();
-			content.AppendLine(string.Format("{0}\tprivate class DataGetter : IDataGetter {{", indent));
-			if (settings.use_hash_string) {
-				content.AppendLine(string.Format("{0}\t\tprivate string[] _Strings;", indent));
-				content.AppendLine(string.Format("{0}\t\tpublic string[] strings {{ get {{ return _Strings; }} }}", indent));
-			}
-			if (hasLang) {
-				content.AppendLine(string.Format("{0}\t\tprivate Func<string, string> _Translate;", indent));
-				content.AppendLine(string.Format("{0}\t\tpublic string Translate(string key) {{", indent));
-				content.AppendLine(string.Format("{0}\t\t\treturn _Translate == null ? key : _Translate(key);", indent));
+				string keyType = GetFieldTypeName(firstField.fieldType);
+				if (string.IsNullOrEmpty(keyType)) { keyType = "int"; }
+				content.AppendLine(string.Format("{0}\t\tint len{1} = _{1}Items.Length;", indent, sheet.itemClassName));
+				content.AppendLine(string.Format("{0}\t\tfor (int i = 0; i < len{1}; i++) {{", indent, sheet.itemClassName));
+				// Init item with external refs and optional features
+				content.Append(string.Format("{0}\t\t\t_{1}Items[i].Init(mVersion", indent, sheet.itemClassName));
+				foreach (var kv in usedExternalExcelRefs) { content.Append(string.Format(", _{0}Ref", kv.Key)); }
+				if (settings.use_hash_string) { content.Append(", _HashStrings"); }
+				if (hasLang) { content.Append(", Translate"); }
+				if (hasRich) { content.Append(", Enrich"); }
+				content.AppendLine(");");
+				// fill map
+				content.AppendLine(string.Format("{0}\t\t\tvar __key{1} = _{1}Items[i].{2};", indent, sheet.itemClassName, firstField.fieldName));
+				content.AppendLine(string.Format("{0}\t\t\tif (_{1}ItemsMap.ContainsKey(__key{1})) {{", indent, sheet.itemClassName));
+				content.AppendLine(string.Format("{0}\t\t\t\tDebug.LogError(\"{1} id already exists\");", indent, sheet.itemClassName));
+				content.AppendLine(string.Format("{0}\t\t\t\tcontinue;", indent));
+				content.AppendLine(string.Format("{0}\t\t\t}}", indent));
+				content.AppendLine(string.Format("{0}\t\t\t_{1}ItemsMap.Add(__key{1}, _{1}Items[i]);", indent, sheet.itemClassName));
 				content.AppendLine(string.Format("{0}\t\t}}", indent));
 			}
-			if (hasRich) {
-				content.AppendLine(string.Format("{0}\t\tprivate Func<string, string> _Enrich;", indent));
-				content.AppendLine(string.Format("{0}\t\tpublic string Enrich(string key) {{", indent));
-				content.AppendLine(string.Format("{0}\t\t\treturn _Enrich == null ? key : _Enrich(key);", indent));
+			content.AppendLine(string.Format("{0}\t\treturn true;", indent));
+			content.AppendLine(string.Format("{0}\t}}", indent));
+			// IDataProvider<T> for first sheet
+			if (sheets.Count > 0) {
+				SheetData s0 = sheets[0];
+				content.AppendLine(string.Format("{0}\tpublic {1} GetById(int id) {{", indent, s0.itemClassName));
+				content.AppendLine(string.Format("{0}\t\tif (_{1}ItemsMap.ContainsKey(id)) {{", indent, s0.itemClassName));
+				content.AppendLine(string.Format("{0}\t\t\treturn _{1}ItemsMap[id];", indent, s0.itemClassName));
 				content.AppendLine(string.Format("{0}\t\t}}", indent));
+				content.AppendLine(string.Format("{0}\t\treturn null;", indent));
+				content.AppendLine(string.Format("{0}\t}}", indent));
+				content.AppendLine(string.Format("{0}\tpublic IReadOnlyCollection<{1}> GetItems() {{", indent, s0.itemClassName));
+				content.AppendLine(string.Format("{0}\t\treturn _{1}Items;", indent, s0.itemClassName));
+				content.AppendLine(string.Format("{0}\t}}", indent));
 			}
-			// No external resolver fields/methods
-			foreach (SheetData sheet in sheets) {
-				FieldData firstField = sheet.fields[0];
-				string idVarName = firstField.fieldName;
-				if (sheet.keyToMultiValues) {
-					content.AppendLine(string.Format("{0}\t\tprivate Func<{1}, List<{2}>, int> _Get{2}List;",
-						indent, GetFieldTypeName(firstField.fieldType), sheet.itemClassName));
-					content.AppendLine(string.Format("{0}\t\tpublic int Get{1}List({2} {3}, List<{1}> items) {{",
-						indent, sheet.itemClassName, GetFieldTypeName(firstField.fieldType), idVarName));
-					content.AppendLine(string.Format("{0}\t\t\treturn _Get{1}List({2}, items);",
-						indent, sheet.itemClassName, idVarName));
-					content.AppendLine(string.Format("{0}\t\t}}", indent));
-				} else {
-					content.AppendLine(string.Format("{0}\t\tprivate Func<{1}, {2}> _Get{2};",
-						indent, GetFieldTypeName(firstField.fieldType), sheet.itemClassName));
-					content.AppendLine(string.Format("{0}\t\tpublic {1} Get{1}({2} {3}) {{",
-						indent, sheet.itemClassName, GetFieldTypeName(firstField.fieldType), idVarName));
-					content.AppendLine(string.Format("{0}\t\t\treturn _Get{1}({2});",
-						indent, sheet.itemClassName, idVarName));
-					content.AppendLine(string.Format("{0}\t\t}}", indent));
-				}
-			}
-			content.AppendFormat("{0}\t\tpublic DataGetter(", indent);
-			bool first = true;
-			if (settings.use_hash_string) { content.Append("string[] strings"); first = false; }
-			if (hasLang) {
-				if (first) { first = false; } else { content.Append(", "); }
-				content.Append("Func<string, string> translate");
-			}
-			if (hasRich) {
-				if (first) { first = false; } else { content.Append(", "); }
-				content.Append("Func<string, string> enrich");
-			}
-			// no external resolvers
-			foreach (SheetData sheet in sheets) {
-				FieldData firstField = sheet.fields[0];
-				if (first) { first = false; } else { content.Append(", "); }
-				if (sheet.keyToMultiValues) {
-					content.AppendFormat("Func<{0}, List<{1}>, int> get{1}List",
-						GetFieldTypeName(firstField.fieldType), sheet.itemClassName);
-				} else {
-					content.AppendFormat("Func<{0}, {1}> get{1}",
-						GetFieldTypeName(firstField.fieldType), sheet.itemClassName);
-				}
-			}
-			content.AppendLine(") {");
-			if (settings.use_hash_string) {
-				content.AppendLine(string.Format("{0}\t\t\t_Strings = strings;", indent));
-			}
-			if (hasLang) {
-				content.AppendLine(string.Format("{0}\t\t\t_Translate = translate;", indent));
-			}
-			if (hasRich) {
-				content.AppendLine(string.Format("{0}\t\t\t_Enrich = enrich;", indent));
-			}
-			// no external resolver fields
-			foreach (SheetData sheet in sheets) {
-				FieldData firstField = sheet.fields[0];
-				if (sheet.keyToMultiValues) {
-					content.AppendLine(string.Format("{0}\t\t\t_Get{1}List = get{1}List;",
-						indent, sheet.itemClassName));
-				} else {
-					content.AppendLine(string.Format("{0}\t\t\t_Get{1} = get{1};",
-						indent, sheet.itemClassName));
-				}
-			}
-			content.AppendLine(string.Format("{0}\t\t}}", indent));
-			content.AppendLine(string.Format("{0}\t}}", indent));
-			content.AppendLine(string.Format("{0}\tprivate DataGetter mDataGetterObject;", indent));
-			content.AppendLine(string.Format("{0}\tprivate DataGetter DataGetterObject {{", indent));
-			content.AppendLine(string.Format("{0}\t\tget {{", indent));
-			content.AppendLine(string.Format("{0}\t\t\tif (mDataGetterObject == null) {{", indent));
-			content.AppendFormat("{0}\t\t\t\tmDataGetterObject = new DataGetter(", indent);
-			first = true;
-			if (settings.use_hash_string) { content.Append("_HashStrings"); first = false; }
-			if (hasLang) {
-				if (first) { first = false; } else { content.Append(", "); }
-				content.Append("Translate");
-			}
-			if (hasRich) {
-				if (first) { first = false; } else { content.Append(", "); }
-				content.Append("Enrich");
-			}
-			// No external resolver constructor params
-			foreach (SheetData sheet in sheets) {
-				FieldData firstField = sheet.fields[0];
-				if (first) { first = false; } else { content.Append(", "); }
-				if (sheet.keyToMultiValues) {
-					content.AppendFormat("Get{0}List", sheet.itemClassName);
-				} else {
-					content.AppendFormat("Get{0}", sheet.itemClassName);
-				}
-			}
-			content.AppendLine(");");
-			content.AppendLine(string.Format("{0}\t\t\t}}", indent));
-			content.AppendLine(string.Format("{0}\t\t\treturn mDataGetterObject;", indent));
-			content.AppendLine(string.Format("{0}\t\t}}", indent));
-			content.AppendLine(string.Format("{0}\t}}", indent));
 			content.AppendLine(string.Format("{0}}}", indent));
 			content.AppendLine();
 
@@ -592,19 +501,19 @@ namespace GreatClock.Common.ExcelToSO {
 						string keygetter = null;
 						if (settings.use_hash_string) {
 							content.AppendLine(string.Format("{0}\tprivate int _{1};", indent, capitalFieldName));
-							keygetter = string.Format("mGetter.strings[_{0}]", capitalFieldName);
+							keygetter = string.Format("mHashStrings[_{0}]", capitalFieldName);
 						} else {
 							content.AppendLine(string.Format("{0}\tprivate {1} _{2};", indent, fieldTypeNameScript, capitalFieldName));
 							keygetter = string.Format("_{0}", capitalFieldName);
 						}
 						content.AppendLine(string.Format("{0}\tprivate {1} _{2}_;", indent, fieldTypeNameScript, capitalFieldName));
-						content.AppendLine(string.Format("{0}\tpublic {1} {2} {{ get {{ if (_{3}_ == null) {{ _{3}_ = mGetter.{4}({5}); }} return _{3}_; }} }}",
+						content.AppendLine(string.Format("{0}\tpublic {1} {2} {{ get {{ if (_{3}_ == null) {{ _{3}_ = {4} == null ? {5} : {4}({5}); }} return _{3}_; }} }}",
 							indent, fieldTypeNameScript, field.fieldName, capitalFieldName, field.fieldType == eFieldTypes.Lang ? "Translate" : "Enrich", keygetter));
 					} else if (field.fieldType == eFieldTypes.Langs || field.fieldType == eFieldTypes.Riches) {
 						string keygetter = null;
 						if (settings.use_hash_string) {
 							content.AppendLine(string.Format("{0}\tprivate int[] _{1};", indent, capitalFieldName));
-							keygetter = string.Format("mGetter.strings[_{0}]", capitalFieldName);
+							keygetter = string.Format("mHashStrings[_{0}]", capitalFieldName);
 						} else {
 							content.AppendLine(string.Format("{0}\tprivate {1} _{2};", indent, fieldTypeNameScript, capitalFieldName));
 							keygetter = string.Format("_{0}", capitalFieldName);
@@ -616,7 +525,7 @@ namespace GreatClock.Common.ExcelToSO {
 						content.AppendLine(string.Format("{0}\t\t\t\tlen = _{1}.Length;", indent, capitalFieldName));
 						content.AppendLine(string.Format("{0}\t\t\t\t_{1}_ = new string[len];", indent, capitalFieldName));
 						content.AppendLine(string.Format("{0}\t\t\t\tfor (int i = 0; i < len, i++) {{", indent));
-						content.AppendLine(string.Format("{0}\t\t\t\t\t_{1}_[i] = mGetter.{2}({3});",
+						content.AppendLine(string.Format("{0}\t\t\t\t\t_{1}_[i] = {2} == null ? {3} : {2}({3});",
 							indent, capitalFieldName, field.fieldType == eFieldTypes.Lang ? "Translate" : "Enrich", keygetter));
 						content.AppendLine(string.Format("{0}\t\t\t\t}}", indent));
 						content.AppendLine(string.Format("{0}\t\t\t}}", indent));
@@ -685,14 +594,32 @@ namespace GreatClock.Common.ExcelToSO {
 				bool hashStringKey = sheet.fields[0].fieldType == eFieldTypes.String && settings.use_hash_string;
 				content.AppendLine(string.Format("{0}\t[NonSerialized]", indent));
 				content.AppendLine(string.Format("{0}\tprivate int mVersion = 0;", indent));
-				content.AppendLine(string.Format("{0}\t[NonSerialized]", indent));
-				content.AppendLine(string.Format("{0}\tprivate {1}.IDataGetter mGetter;", indent, className));
+				if (settings.use_hash_string) {
+					content.AppendLine(string.Format("{0}\tprivate string[] mHashStrings;", indent));
+				}
+				if (hasLang) {
+					content.AppendLine(string.Format("{0}\tprivate Func<string,string> mTranslate;", indent));
+				}
+				if (hasRich) {
+					content.AppendLine(string.Format("{0}\tprivate Func<string,string> mEnrich;", indent));
+				}
 				content.AppendLine();
 				// Build Init signature with sheet refs
 				StringBuilder __initParams = new StringBuilder();
 				foreach (var __kv in usedExternalExcelRefs) { string __p = char.ToLower(__kv.Key[0]) + __kv.Key.Substring(1); __initParams.AppendFormat(", {0} {1}Ref", __kv.Value, __p); }
 				if (hashStringKey) { __initParams.Append(", bool keyOnly"); }
-				content.AppendLine(string.Format("{0}\tpublic {1} Init(int version, {2}.IDataGetter getter{3} ){{", indent, sheet.itemClassName, className, __initParams.ToString()));
+				// Init signature without IDataGetter; accept external refs and optional features
+				{
+					StringBuilder __sig = new StringBuilder();
+					__sig.Append(string.Format("{0}\tpublic {1} Init(int version", indent, sheet.itemClassName));
+					foreach (var __kv in usedExternalExcelRefs) { string __p = char.ToLower(__kv.Key[0]) + __kv.Key.Substring(1); __sig.AppendFormat(", {0} {1}Ref", __kv.Value, __p); }
+					if (hashStringKey || settings.use_hash_string) { __sig.Append(", bool keyOnly"); }
+					if (settings.use_hash_string) { __sig.Append(", string[] strings"); }
+					if (hasLang) { __sig.Append(", Func<string,string> translate"); }
+					if (hasRich) { __sig.Append(", Func<string,string> enrich"); }
+					__sig.Append(" ){");
+					content.AppendLine(__sig.ToString());
+				}
 				// if(usedExternalExcelRefs.Count > 0)
 				// {
 				// 	foreach(var __kv in usedExternalExcelRefs)
@@ -703,22 +630,18 @@ namespace GreatClock.Common.ExcelToSO {
 				// content.Append(") {");
 
 				content.AppendLine(string.Format("{0}\t\tif (mVersion == version) {{ return this; }}", indent));
-				content.AppendLine(string.Format("{0}\t\tmGetter = getter;", indent));
-				// if(usedExternalExcelRefs.Count > 0)
-				// {
-				// 	foreach(var __kv in usedExternalExcelRefs)
-				// 	{
-				// 		content.AppendLine(string.Format("{0}\t\t_{1}Ref = {2}Ref;", indent, __kv.Key, __kv.Value.First().ToString().ToLower() + __kv.Value.Substring(1)));
-				// 	}
-				// }
+				// removed mGetter assignment
 				foreach (var __kv in usedExternalExcelRefs) { string __p = char.ToLower(__kv.Key[0]) + __kv.Key.Substring(1); content.AppendLine(string.Format("{0}\t\t_{1}Ref = {2}Ref;", indent, __kv.Key, __p)); }
+				if (settings.use_hash_string) { content.AppendLine(string.Format("{0}\t\tmHashStrings = strings;", indent)); }
+				if (hasLang) { content.AppendLine(string.Format("{0}\t\tmTranslate = translate;", indent)); }
+				if (hasRich) { content.AppendLine(string.Format("{0}\t\tmEnrich = enrich;", indent)); }
 				bool firstField = true;
 				foreach (FieldData field in sheet.fields) {
 					string capitalFieldName = CapitalFirstChar(field.fieldName);
 					switch (field.fieldType) {
 						case eFieldTypes.String:
 							if (settings.use_hash_string) {
-								content.AppendLine(string.Format("{0}\t\t_{1}_ = getter.strings[_{1}];",
+								content.AppendLine(string.Format("{0}\t\t_{1}_ = strings[_{1}];",
 									indent, capitalFieldName));
 							}
 							break;
@@ -730,7 +653,7 @@ namespace GreatClock.Common.ExcelToSO {
 									indent, capitalFieldName));
 								content.AppendLine(string.Format("{0}\t\tfor (int i = 0; i < len{1}; i++) {{",
 									indent, capitalFieldName));
-								content.AppendLine(string.Format("{0}\t\t\t_{1}_[i] = getter.strings[_{1}[i]];",
+								content.AppendLine(string.Format("{0}\t\t\t_{1}_[i] = strings[_{1}[i]];",
 									indent, capitalFieldName, field.fieldTypeName));
 								content.AppendLine(string.Format("{0}\t\t}}", indent));
 							}
@@ -2173,8 +2096,9 @@ namespace GreatClock.Common.ExcelToSO {
 				cachedGUIBGColor = GUI.backgroundColor;
 				GUI.backgroundColor = processable ? Color.green : Color.white;
 				EditorGUI.BeginDisabledGroup(!processable);
-				if (GUI.Button(pos, "Process Excel")) {
-					toProcess.to_generate_code.Add(GetGenerateCodeSetting(mSetting));
+			if (GUI.Button(pos, "Process Excel")) {
+				EnsureIDataProviderFile(mSetting.script_directory);
+				toProcess.to_generate_code.Add(GetGenerateCodeSetting(mSetting));
 					FlushDataSettings setting = GetFlushDataSettings(mSetting);
 					toProcess.to_flush_data.Add(setting);
 					if (!evt.shift) {
