@@ -17,21 +17,42 @@ namespace GreatClock.Common.ExcelToSO {
 	public class ExcelToScriptableObject : EditorWindow {
 
 	public const string SETTINGS_PATH = "ProjectSettings/ExcelToScriptableObjectSettings.asset";
-	private const string IDataProviderTemplatePath = "Assets/excel_to_scriptableobject/IDataProvider.cs";
- 
-		private static void EnsureIDataProviderFile(string scriptDirectory) {
+
+		private static void EnsureIDataProviderFile(string scriptDirectory, string nameSpace) {
 			if (string.IsNullOrEmpty(scriptDirectory)) { return; }
 			if (!CheckIsDirectoryValid(scriptDirectory)) { return; }
-			string sourcePath = IDataProviderTemplatePath;
-			string sourceFullPath = Path.Combine(Application.dataPath.Substring(0, Application.dataPath.Length - "Assets".Length), sourcePath);
-			if (!File.Exists(sourceFullPath)) { return; }
 			string targetPath = scriptDirectory.EndsWith("/") ? (scriptDirectory + "IDataProvider.cs") : (scriptDirectory + "/IDataProvider.cs");
 			string projectRoot = Application.dataPath.Substring(0, Application.dataPath.Length - "Assets".Length);
 			string fullTargetPath = Path.Combine(projectRoot, targetPath.Replace('/', Path.DirectorySeparatorChar));
 			if (File.Exists(fullTargetPath)) { return; }
 			string targetDir = Path.GetDirectoryName(fullTargetPath);
 			if (!Directory.Exists(targetDir)) { Directory.CreateDirectory(targetDir); }
-			File.Copy(sourceFullPath, fullTargetPath, false);
+			StringBuilder builder = new StringBuilder();
+			builder.AppendLine("using System.Collections.Generic;");
+			builder.AppendLine();
+			string indent = string.Empty;
+			if (!string.IsNullOrEmpty(nameSpace)) {
+				builder.AppendLine(string.Format("namespace {0} {{", nameSpace));
+				builder.AppendLine();
+				indent = "\t";
+			}
+			builder.AppendLine(string.Format("{0}public interface IDataProvider<T>", indent));
+			builder.AppendLine(string.Format("{0}{{", indent));
+			builder.AppendLine();
+			builder.AppendLine(string.Format("{0}\tbool Init();", indent));
+			builder.AppendLine();
+			builder.AppendLine(string.Format("{0}\tvoid Reset();", indent));
+			builder.AppendLine();
+			builder.AppendLine(string.Format("{0}\tT GetById(int id);", indent));
+			builder.AppendLine();
+			builder.AppendLine(string.Format("{0}\tIReadOnlyCollection<T> GetItems();", indent));
+			builder.AppendLine();
+			builder.AppendLine(string.Format("{0}}}", indent));
+			if (!string.IsNullOrEmpty(nameSpace)) {
+				builder.AppendLine();
+				builder.AppendLine("}");
+			}
+			File.WriteAllText(fullTargetPath, builder.ToString(), Encoding.UTF8);
 			AssetDatabase.ImportAsset(targetPath);
 		}
 
@@ -51,7 +72,7 @@ namespace GreatClock.Common.ExcelToSO {
 			for (int i = 0, imax = excel_settings.Count; i < imax; i++) {
 				ExcelToScriptableObjectSetting excel_setting = excel_settings[i];
 				if (!CheckProcessable(excel_setting)) { continue; }
-				EnsureIDataProviderFile(excel_setting.script_directory);
+				EnsureIDataProviderFile(excel_setting.script_directory, excel_setting.name_space);
 				FlushDataSettings setting = GetFlushDataSettings(excel_setting);
 				FlushData(setting);
 				for (int j = 0, jmax = excel_setting.slaves.Length; j < jmax; j++) {
@@ -72,7 +93,7 @@ namespace GreatClock.Common.ExcelToSO {
 			for (int i = 0, imax = excel_settings == null ? 0 : excel_settings.Count; i < imax; i++) {
 				ExcelToScriptableObjectSetting excel_setting = excel_settings[i];
 				if (excel_setting == null) { continue; }
-				EnsureIDataProviderFile(excel_setting.script_directory);
+				EnsureIDataProviderFile(excel_setting.script_directory, excel_setting.name_space);
 			}
 			HashSet<string> processedDirs = new HashSet<string>();
 			int fixedCount = 0;
@@ -162,7 +183,7 @@ namespace GreatClock.Common.ExcelToSO {
 		}
 
 		static bool GenerateCode(GenerateCodeSettings settings) {
-			EnsureIDataProviderFile(settings.script_directory);
+			EnsureIDataProviderFile(settings.script_directory, settings.name_space);
 			// Build external custom type flags and qualified names from Ref Excels
 			Dictionary<string, string> externalTypeFlags = new Dictionary<string, string>();
 			Dictionary<string, string> externalQualifiedNames = new Dictionary<string, string>();
@@ -2097,7 +2118,7 @@ namespace GreatClock.Common.ExcelToSO {
 				GUI.backgroundColor = processable ? Color.green : Color.white;
 				EditorGUI.BeginDisabledGroup(!processable);
 			if (GUI.Button(pos, "Process Excel")) {
-				EnsureIDataProviderFile(mSetting.script_directory);
+				EnsureIDataProviderFile(mSetting.script_directory, mSetting.name_space);
 				toProcess.to_generate_code.Add(GetGenerateCodeSetting(mSetting));
 					FlushDataSettings setting = GetFlushDataSettings(mSetting);
 					toProcess.to_flush_data.Add(setting);
