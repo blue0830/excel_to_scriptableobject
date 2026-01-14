@@ -568,6 +568,7 @@ namespace GreatClock.Common.ExcelToSO {
 						}
 						if (keyFlag.Length > 1) {
 							content.AppendLine(string.Format("{0}\tprivate static List<{1}> s_{2} = new List<{1}>();", indent, fieldTypeNameScript, capitalFieldName));
+							content.AppendLine(string.Format("{0}\t[NonSerialized]", indent));
 							content.AppendLine(string.Format("{0}\tprivate {1}[] _{2}_;", indent, fieldTypeNameScript, capitalFieldName));
 							content.AppendLine(string.Format("{0}\tpublic {1}[] {2} {{", indent, fieldTypeNameScript, field.fieldName));
 							content.AppendLine(string.Format("{0}\t\tget {{", indent));
@@ -575,6 +576,7 @@ namespace GreatClock.Common.ExcelToSO {
 							content.AppendLine(string.Format("{0}\t\t}}", indent));
 							content.AppendLine(string.Format("{0}\t}}", indent));
 						} else {
+							content.AppendLine(string.Format("{0}\t[NonSerialized]", indent));
 							content.AppendLine(string.Format("{0}\tprivate {1} _{2}_;", indent, fieldTypeNameScript, capitalFieldName));
 							content.AppendLine(string.Format("{0}\tpublic {1} {2} {{", indent, fieldTypeNameScript, field.fieldName));
 							content.AppendLine(string.Format("{0}\t\tget {{", indent));
@@ -598,6 +600,7 @@ namespace GreatClock.Common.ExcelToSO {
 						if (keyFlag.Length > 1) {
 							content.AppendLine(string.Format("{0}\tprivate static List<{1}> s_{2} = new List<{1}>();", indent, field.fieldTypeName, capitalFieldName));
 						}
+						content.AppendLine(string.Format("{0}\t[NonSerialized]", indent));
 						content.AppendLine(string.Format("{0}\tprivate {1} _{2}_;", indent, fieldTypeNameScript, capitalFieldName));
 						content.AppendLine(string.Format("{0}\tpublic {1} {2} {{ get {{ return _{3}_; }} }}",
 							indent, fieldTypeNameScript, field.fieldName, capitalFieldName));
@@ -651,11 +654,15 @@ namespace GreatClock.Common.ExcelToSO {
 				// content.Append(") {");
 
 				content.AppendLine(string.Format("{0}\t\tif (mVersion == version) {{ return this; }}", indent));
+				if (hashStringKey || settings.use_hash_string) {
+					content.AppendLine(string.Format("{0}\t\tif (keyOnly) {{ mVersion = version; return this; }}", indent));
+				}
 				// removed mGetter assignment
 				foreach (var __kv in usedExternalExcelRefs) { string __p = char.ToLower(__kv.Key[0]) + __kv.Key.Substring(1); content.AppendLine(string.Format("{0}\t\t_{1}Ref = {2}Ref;", indent, __kv.Key, __p)); }
 				if (settings.use_hash_string) { content.AppendLine(string.Format("{0}\t\tmHashStrings = strings;", indent)); }
 				if (hasLang) { content.AppendLine(string.Format("{0}\t\tmTranslate = translate;", indent)); }
 				if (hasRich) { content.AppendLine(string.Format("{0}\t\tmEnrich = enrich;", indent)); }
+				content.AppendLine(string.Format("{0}\t\tmVersion = version;", indent));
 				bool firstField = true;
 				foreach (FieldData field in sheet.fields) {
 					string capitalFieldName = CapitalFirstChar(field.fieldName);
@@ -808,9 +815,7 @@ namespace GreatClock.Common.ExcelToSO {
 					if (!firstField) { continue; }
 					firstField = false;
 					if (!hashStringKey) { continue; }
-					content.AppendLine(string.Format("{0}\t\tif (keyOnly) {{ return this; }}", indent));
 				}
-				content.AppendLine(string.Format("{0}\t\tmVersion = version;", indent));
 				content.AppendLine(string.Format("{0}\t\treturn this;", indent));
 				content.AppendLine(string.Format("{0}\t}}", indent));
 				content.AppendLine();

@@ -49,10 +49,12 @@ This guide explains how to reference an unknown type in Excel A to a Sheet in Ex
   - Ensure the referenced Excel (B) is processed and its asset is available at runtime; otherwise routed lookups will fail.
   - If both A and B contain an internal Sheet named `Buffer`, internal data is used unless the type is mapped as external via refs.
   - Changing Sheet names or moving files requires re-processing to refresh mappings.
+  - **Self-reference (A->A)**: Generated code now serializes only keys for custom types (including self refs) and keeps the resolved object caches `[NonSerialized]` to avoid Unity serialization cycles. At runtime the getter resolves by key, so a field like `SkillData[] Next_level_skills` is stored as `int[]` keys and a non-serialized `SkillData[]` cache.
 - CN:
   - 确保被引用的 Excel（B）已生成并在运行时可加载，否则路由查询会失败。
   - 若 A 与 B 同时存在内部 `Buffer`，除非通过 refs 将类型映射为外部，否则默认使用内部数据。
   - 变更 Sheet 名称或移动文件后需重新生成以刷新映射。
+  - **自引用场景 (A->A)**：生成代码对自定义类型字段（含自引用）仅序列化主键，解析到的对象缓存字段标记为 `[NonSerialized]`，避免 Unity 序列化循环。运行时通过主键解析得到对象，如 `SkillData[] Next_level_skills` 在资产中存为 `int[]` 主键，并在 getter 中懒加载为非序列化的 `SkillData[]`。
 
 ## Troubleshooting / 故障排查
 - EN:
