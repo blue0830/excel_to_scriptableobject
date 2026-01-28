@@ -878,6 +878,9 @@ namespace GreatClock.Common.ExcelToSO {
 					content.AppendLine();
 					if (toStringContainsArray) {
 						content.AppendLine(string.Format("{0}\tprivate string array2string(Array array) {{", indent));
+						content.AppendLine(string.Format("{0}\t\tif (array == null || array.Length == 0) {{", indent));
+						content.AppendLine(string.Format("{0}\t\t\treturn \"[]\";", indent));
+						content.AppendLine(string.Format("{0}\t\t}}", indent));
 						content.AppendLine(string.Format("{0}\t\tint len = array.Length;", indent));
 						content.AppendLine(string.Format("{0}\t\tstring[] strs = new string[len];", indent));
 						content.AppendLine(string.Format("{0}\t\tfor (int i = 0; i < len; i++) {{", indent));
