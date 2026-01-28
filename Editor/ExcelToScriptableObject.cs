@@ -1,4 +1,4 @@
-﻿using Excel;
+using Excel;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -14,6 +14,10 @@ using UnityEngine;
 
 namespace GreatClock.Common.ExcelToSO {
 
+	/// <summary>
+	/// Editor window that manages Excel-to-SO generation and settings storage.
+	/// Notes: Runs in editor only and persists settings to ProjectSettings JSON.
+	/// </summary>
 	public class ExcelToScriptableObject : EditorWindow {
 
 	public const string SETTINGS_PATH = "ProjectSettings/ExcelToScriptableObjectSettings.asset";
@@ -158,6 +162,9 @@ namespace GreatClock.Common.ExcelToSO {
 			public string fieldTypeName;
 		}
 
+		/// <summary>
+		/// Settings snapshot for a single code generation pass.
+		/// </summary>
 		private struct GenerateCodeSettings {
 			public string excel_path;
 			public string script_directory;
@@ -168,6 +175,8 @@ namespace GreatClock.Common.ExcelToSO {
 			public bool compress_color_into_int;
 			public bool treat_unknown_types_as_enum;
 			public bool generate_tostring_method;
+			// Enables Odin Searchable for array fields (requires ODIN_INSPECTOR define).
+			public bool use_odin;
 			public string[] ref_excels;
 		}
 
@@ -180,6 +189,14 @@ namespace GreatClock.Common.ExcelToSO {
 			public bool compress_color_into_int;
 			public bool treat_unknown_types_as_enum;
 			public string[] ref_excels;
+		}
+
+		// Adds Odin Searchable attribute for array fields when enabled.
+		private static void AppendOdinSearchableIfNeeded(StringBuilder content, string indent, bool useOdin, bool isArrayField) {
+			if (!useOdin || !isArrayField) { return; }
+			content.AppendLine("#if ODIN_INSPECTOR");
+			content.AppendLine(string.Format("{0}\t[Searchable]", indent));
+			content.AppendLine("#endif");
 		}
 
 		static bool GenerateCode(GenerateCodeSettings settings) {
@@ -259,6 +276,13 @@ namespace GreatClock.Common.ExcelToSO {
 			bool usingCollections = true;
 			content.AppendLine("using System.Collections.Generic;");
 			content.AppendLine();
+			// Optional Odin support for searchable arrays.
+			if (settings.use_odin) {
+				content.AppendLine("#if ODIN_INSPECTOR");
+				content.AppendLine("using Sirenix.OdinInspector;");
+				content.AppendLine("#endif");
+				content.AppendLine();
+			}
 
 			string indent = "";
 			if (!string.IsNullOrEmpty(settings.name_space)) {
@@ -270,6 +294,7 @@ namespace GreatClock.Common.ExcelToSO {
 			content.AppendLine(string.Format("{0}public partial class {1} : ScriptableObject, IDataProvider<{2}> {{", indent, className, sheets.Count > 0 ? sheets[0].itemClassName : "object"));
 			content.AppendLine();
 			if (settings.use_hash_string) {
+				AppendOdinSearchableIfNeeded(content, indent, settings.use_odin, true);
 				content.AppendLine(string.Format("{0}\t{1}", indent, serializeAttribute));
 				content.AppendLine(string.Format("{0}\tprivate string[] _HashStrings;", indent));
 				content.AppendLine();
@@ -314,6 +339,7 @@ namespace GreatClock.Common.ExcelToSO {
 			foreach (SheetData sheet in sheets) {
 				FieldData firstField = sheet.fields[0];
 				bool hashStringKey = firstField.fieldType == eFieldTypes.String && settings.use_hash_string;
+				AppendOdinSearchableIfNeeded(content, indent, settings.use_odin, true);
 				content.AppendLine(string.Format("{0}\t{1}", indent, serializeAttribute));
 				content.AppendLine(string.Format("{0}\tprivate {1}[] _{1}Items;", indent, sheet.itemClassName));
 				// Per-sheet dictionary for fast lookup
@@ -498,7 +524,10 @@ namespace GreatClock.Common.ExcelToSO {
 							fieldTypeNameScript = GetFieldTypeName(field.fieldType);
 							break;
 					}
+					bool isArrayField = fieldTypeNameScript != null &&
+						fieldTypeNameScript.EndsWith("[]", StringComparison.Ordinal);
 					string capitalFieldName = CapitalFirstChar(field.fieldName);
+					AppendOdinSearchableIfNeeded(content, indent, settings.use_odin, isArrayField);
 					content.AppendLine(string.Format("{0}\t{1}", indent, serializeAttribute));
 					if (settings.use_hash_string && (field.fieldType == eFieldTypes.String || field.fieldType == eFieldTypes.Strings)) {
 						content.AppendLine(string.Format("{0}\tprivate {1} _{2};",
@@ -2215,6 +2244,8 @@ namespace GreatClock.Common.ExcelToSO {
 				pos.y += pos.height + EditorGUIUtility.standardVerticalSpacing;
 				mSetting.generate_tostring_method = EditorGUI.ToggleLeft(pos, "Generate ToString Method", mSetting.generate_tostring_method);
 				pos.y += pos.height + EditorGUIUtility.standardVerticalSpacing;
+				mSetting.use_odin = EditorGUI.ToggleLeft(pos, "Use Odin", mSetting.use_odin);
+				pos.y += pos.height + EditorGUIUtility.standardVerticalSpacing;
 				pos.x = rect.x;
 				pos.width = rect.width;
 				pos.height = mSlavesList.GetHeight();
@@ -2464,6 +2495,7 @@ namespace GreatClock.Common.ExcelToSO {
 						setting.compress_color_into_int = prev.compress_color_into_int;
 						setting.treat_unknown_types_as_enum = prev.treat_unknown_types_as_enum;
 						setting.generate_tostring_method = prev.generate_tostring_method;
+						setting.use_odin = prev.use_odin;
 					}
 					ExcelToScriptableObjectSettingWrap wrap = new ExcelToScriptableObjectSettingWrap(setting, mOnRemoveExcel);
 					wrap.UpdateDirIndices(mFolders);
@@ -2709,6 +2741,7 @@ namespace GreatClock.Common.ExcelToSO {
 			ret.compress_color_into_int = setting.compress_color_into_int;
 			ret.treat_unknown_types_as_enum = setting.treat_unknown_types_as_enum;
 			ret.generate_tostring_method = setting.generate_tostring_method;
+			ret.use_odin = setting.use_odin;
 			ret.ref_excels = setting.ref_excels;
 			return ret;
 		}
@@ -2862,6 +2895,9 @@ namespace GreatClock.Common.ExcelToSO {
 	}
 
 	[Serializable]
+	/// <summary>
+	/// Per-excel configuration persisted to ProjectSettings JSON.
+	/// </summary>
 	public class ExcelToScriptableObjectSetting {
 		public string excel_name;
 		public string script_directory = "Assets";
@@ -2873,6 +2909,8 @@ namespace GreatClock.Common.ExcelToSO {
 		public bool compress_color_into_int = true;
 		public bool treat_unknown_types_as_enum = false;
 		public bool generate_tostring_method = true;
+		// When enabled, generated code adds Odin Searchable for array fields.
+		public bool use_odin = false;
 		public ExcelToScriptableObjectSlave[] slaves;
 		public string[] ref_excels;
 	}
