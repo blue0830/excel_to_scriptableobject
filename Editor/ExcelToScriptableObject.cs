@@ -1,4 +1,4 @@
-using Excel;
+using ExcelDataReader;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -1321,7 +1321,12 @@ namespace GreatClock.Common.ExcelToSO {
 				return false;
 			}
 			IExcelDataReader reader = excel_path.ToLower().EndsWith(".xls") ? ExcelReaderFactory.CreateBinaryReader(stream) : ExcelReaderFactory.CreateOpenXmlReader(stream);
-			DataSet data = reader.AsDataSet();
+			DataSet data = reader.AsDataSet(new ExcelDataSetConfiguration {
+				UseColumnDataType = false,
+				ConfigureDataTable = (_) => new ExcelDataTableConfiguration {
+					UseHeaderRow = false
+				}
+			});
 			reader.Dispose();
 			stream.Close();
 			File.Delete(tempExcel);
